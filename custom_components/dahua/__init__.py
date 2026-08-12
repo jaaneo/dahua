@@ -614,6 +614,12 @@ class DahuaDataUpdateCoordinator(DataUpdateCoordinator):
 
         if code == "CrossLineDetection" or code == "CrossRegionDetection":
             data = event.get("data", event.get("Data", {}))
+            # Camera firmware occasionally truncates the JSON body (or it arrives split
+            # across TCP reads and fails to parse), leaving "data" as a raw string instead
+            # of a dict. Treat that as "no extra data" rather than crashing -- an
+            # uncaught AttributeError here kills the whole event stream connection.
+            if not isinstance(data, dict):
+                data = {}
             object_type = data.get("Object", {}).get("ObjectType", "").lower()
             codes = []
 
