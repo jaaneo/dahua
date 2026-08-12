@@ -158,6 +158,15 @@ class DahuaDataUpdateCoordinator(DataUpdateCoordinator):
 
         self._floodlight_mode = 2
 
+        # Buffer for reassembling event stream chunks that get split across TCP reads.
+        # iter_chunks() in client.stream_events() has no relation to the multipart event
+        # boundaries, so a single event (esp. large CrossLine/CrossRegion JSON payloads)
+        # can arrive split across two or more chunks. Without buffering, a split chunk
+        # either fails JSON parsing (leaves "data" as an unparsed string) or gets dropped
+        # entirely if it does not start with "Code=" -- which can silently swallow Stop
+        # events and leave binary_sensors stuck on.
+        self._event_buffer = ""
+
         super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=SCAN_INTERVAL_SECONDS)
 
     async def async_start_event_listener(self):
@@ -541,8 +550,17 @@ class DahuaDataUpdateCoordinator(DataUpdateCoordinator):
             'name': 'Cam8', 'Code': 'CrossLineDetection', 'action': 'Start', 'index': '0', 'data': {'Class': 'Normal', 'DetectLine': [[18, 4098], [8155, 5549]], 'Direction':      'RightToLeft', 'EventSeq': 40, 'FrameSequence': 549073, 'GroupID': 40, 'Mark': 0, 'Name': 'Rule1', 'Object': {'Action': 'Appear', 'BoundingBox': [4816, 4552, 5248, 5272], 'Center': [5032, 4912], 'Confidence': 0, 'FrameSequence': 0, 'ObjectID': 542, 'ObjectType': 'Unknown', 'RelativeID': 0, 'Source': 0.0, 'Speed': 0, 'SpeedTypeInternal': 0}, 'PTS': 42986015370.0, 'RuleId': 1, 'Source': 51190936.0, 'Track': None, 'UTC': 1620477656, 'UTCMS': 180}
         }
         """
-        data = data_bytes.decode("utf-8", errors="ignore")
-        events = parse_event(data)
+        # Reassemble chunks: only process blocks confirmed complete by the arrival of
+        # the *next* boundary marker. Keep the trailing (possibly incomplete) part
+        # buffered for the next call instead of parsing it prematurely.
+        self._event_buffer += data_bytes.decode("utf-8", errors="ignore")
+        boundary = "--myboundary\n"
+        split_at = self._event_buffer.rfind(boundary)
+        if split_at <= 0:
+            return
+        complete_data = self._event_buffer[:split_at]
+        self._event_buffer = self._event_buffer[split_at:]
+        events = parse_event(complete_data)
 
         if len(events) == 0:
             return
